@@ -1,0 +1,364 @@
+#!/usr/bin/env bash
+# plum - GitHub workflow helper (GitLab-style)
+# Usage:
+#   plum create issue "Title"
+#   plum create issue -b "Title"
+#   plum create issue -b -mr "Title"
+#   plum create issue -b -mr -t <target-branch> "Title"
+#   plum create branch <issue-number>
+#   plum create branch -t <base-branch> <issue-number>
+#   plum create mr "PR title"
+#   plum create mr -t <target-branch> "PR title"
+
+set -euo pipefail
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+red()   { printf '\033[31m%s\033[0m\n' "$*"; }
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+blue()  { printf '\033[34m%s\033[0m\n' "$*"; }
+bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
+
+die() { red "Error: $*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+$(bold "plum") — GitHub workflow helper
+
+$(bold "USAGE")
+  plum create issue  [OPTIONS] "Issue title"
+  plum create branch [OPTIONS] <issue-number>
+  plum create mr     [OPTIONS] "PR title"
+
+$(bold "OPTIONS — create issue")
+  -b            Create a branch linked to the issue (GitLab-style name)
+  -mr           Create a pull request from the branch to the target branch
+  -t <branch>   Base/target branch (default: main)
+
+$(bold "OPTIONS — create branch")
+  -t <branch>   Base branch to branch off from (default: main)
+
+$(bold "OPTIONS — create mr")
+  -t <branch>   Target branch for the PR (default: main)
+
+$(bold "EXAMPLES")
+  plum create issue "Fix login bug"
+  plum create issue -b "Fix login bug"
+  plum create issue -b -mr "Fix login bug"
+  plum create issue -b -mr -t develop "Fix login bug"
+
+  plum create branch 42
+  plum create branch -t develop 42
+
+  plum create mr "Fix login bug"
+  plum create mr -t develop "Fix login bug"
+
+$(bold "SETUP")
+  Add your GitHub Classic Personal Access Token (scope: repo) in .env:
+    echo 'GITHUB_TOKEN=ghp_xxxxxxxxxxxx' >> .env
+
+  Or export it in your shell as a fallback:
+    export GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+EOF
+}
+
+# ── Shared init: repo detection + token loading ────────────────────────────────
+
+REPO=""
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+CURRENT_USER=""
+
+init() {
+  # Detect repo from git remote
+  local remote_url
+  remote_url=$(git remote get-url origin 2>/dev/null) \
+    || die "No git remote 'origin' found"
+  REPO=$(echo "$remote_url" \
+    | sed 's|git@github.com:||' \
+    | sed 's|https://github.com/||' \
+    | sed 's|\.git$||')
+  [[ -z "$REPO" ]] && die "Could not extract repo from remote: ${remote_url}"
+
+  # Load .env from the repo root (where this script lives), then fallback to env var
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -f "${script_dir}/.env" ]]; then
+    local token_from_env
+    token_from_env=$(grep -E '^GITHUB_TOKEN=' "${script_dir}/.env" | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d "'")
+    [[ -n "$token_from_env" ]] && GITHUB_TOKEN="$token_from_env"
+  fi
+  [[ -z "${GITHUB_TOKEN}" ]] && die "GITHUB_TOKEN is not set.\nAdd it to .env: echo 'GITHUB_TOKEN=ghp_xxx' >> .env"
+
+  # Resolve authenticated user for auto-assignment
+  local user_response
+  user_response=$(gh_api GET "/user")
+  CURRENT_USER=$(echo "$user_response" | python3 -c 'import json,sys; print(json.load(sys.stdin)["login"])' 2>/dev/null) || CURRENT_USER=""
+
+  echo ""
+  bold "Repository: ${REPO}"
+  [[ -n "$CURRENT_USER" ]] && bold "User:       ${CURRENT_USER}"
+  echo ""
+}
+
+# ── GitHub API ─────────────────────────────────────────────────────────────────
+
+gh_api() {
+  local method="$1"
+  local endpoint="$2"
+  local data="${3:-}"
+
+  local args=(
+    -s -S
+    -X "$method"
+    -H "Authorization: Bearer ${GITHUB_TOKEN}"
+    -H "Accept: application/vnd.github+json"
+    -H "X-GitHub-Api-Version: 2022-11-28"
+  )
+
+  if [[ -n "$data" ]]; then
+    args+=(-H "Content-Type: application/json" -d "$data")
+  fi
+
+  curl "${args[@]}" "https://api.github.com${endpoint}"
+}
+
+# ── Shared utilities ───────────────────────────────────────────────────────────
+
+# Slugify: lowercase, accents stripped, spaces/special chars → hyphens
+slugify() {
+  local input="$1"
+  local transliterated
+  transliterated=$(echo "$input" | iconv -f utf-8 -t ascii//TRANSLIT 2>/dev/null) || transliterated="$input"
+  echo "$transliterated" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed 's/[^a-z0-9]/-/g' \
+    | sed 's/--*/-/g' \
+    | sed 's/^-//;s/-$//'
+}
+
+json_str() {
+  printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'
+}
+
+# Fetch issue by number; die if not found. Prints the issue title.
+fetch_issue_title() {
+  local issue_number="$1"
+
+  local response
+  response=$(gh_api GET "/repos/${REPO}/issues/${issue_number}")
+
+  local status
+  status=$(echo "$response" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("status","ok"))' 2>/dev/null || echo "ok")
+
+  if [[ "$status" == "404" ]]; then
+    die "Issue #${issue_number} not found in ${REPO}"
+  fi
+
+  local title
+  title=$(echo "$response" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["title"])' 2>/dev/null) \
+    || die "Failed to fetch issue #${issue_number}. Response:\n${response}"
+
+  echo "$title"
+}
+
+# ── Core actions ───────────────────────────────────────────────────────────────
+
+create_issue() {
+  local title="$1"
+
+  blue "Creating issue: \"${title}\"..."
+
+  local assignees="[]"
+  [[ -n "$CURRENT_USER" ]] && assignees="[$(json_str "$CURRENT_USER")]"
+
+  local response
+  response=$(gh_api POST "/repos/${REPO}/issues" \
+    "{\"title\": $(json_str "$title"), \"assignees\": ${assignees}}")
+
+  local issue_number issue_url
+  issue_number=$(echo "$response" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["number"])' 2>/dev/null) \
+    || die "Failed to create issue. Response:\n${response}"
+  issue_url=$(echo "$response" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["html_url"])')
+
+  green "Issue #${issue_number} created: ${issue_url}"
+  [[ -n "$CURRENT_USER" ]] && green "Assigned to: ${CURRENT_USER}"
+  echo "$issue_number"
+}
+
+create_branch() {
+  local issue_number="$1"
+  local title="$2"
+  local base_branch="${3:-main}"
+
+  local slug
+  slug=$(slugify "$title")
+  local branch_name="${issue_number}-${slug}"
+
+  blue "Creating branch: ${branch_name} (from ${base_branch})..."
+
+  # Get SHA of base branch
+  local sha_response sha
+  sha_response=$(gh_api GET "/repos/${REPO}/git/ref/heads/${base_branch}")
+  sha=$(echo "$sha_response" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["object"]["sha"])' 2>/dev/null) \
+    || die "Base branch '${base_branch}' not found. Response:\n${sha_response}"
+
+  local response
+  response=$(gh_api POST "/repos/${REPO}/git/refs" \
+    "{\"ref\": \"refs/heads/${branch_name}\", \"sha\": \"${sha}\"}")
+
+  echo "$response" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["ref"])' 2>/dev/null \
+    || die "Failed to create branch. Response:\n${response}"
+
+  green "Branch created: ${branch_name}"
+  echo "$branch_name"
+}
+
+create_pr() {
+  local head_branch="$1"
+  local title="$2"
+  local target_branch="$3"
+  local issue_number="${4:-}"
+
+  [[ "$head_branch" == "$target_branch" ]] \
+    && die "Cannot create a PR from '${head_branch}' to itself. Choose a different target branch with -t."
+
+  blue "Creating pull request: \"${title}\" (${head_branch} → ${target_branch})..."
+
+  local body=""
+  [[ -n "$issue_number" ]] && body="Closes #${issue_number}"
+
+  local response
+  response=$(gh_api POST "/repos/${REPO}/pulls" \
+    "{
+      \"title\": $(json_str "$title"),
+      \"head\": \"${head_branch}\",
+      \"base\": \"${target_branch}\",
+      \"body\": $(json_str "$body"),
+      \"draft\": false
+    }")
+
+  local pr_url
+  pr_url=$(echo "$response" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["html_url"])' 2>/dev/null) \
+    || die "Failed to create pull request. Response:\n${response}"
+
+  green "Pull request created: ${pr_url}"
+}
+
+# ── Command handlers ───────────────────────────────────────────────────────────
+
+cmd_create_issue() {
+  local create_branch_flag=false
+  local create_mr_flag=false
+  local target_branch="main"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -b)        create_branch_flag=true; shift ;;
+      -mr)       create_mr_flag=true; shift ;;
+      -t)        [[ $# -lt 2 ]] && die "-t requires a branch name"; target_branch="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      -*)        die "Unknown option: $1" ;;
+      *)         break ;;
+    esac
+  done
+
+  [[ $# -eq 0 ]] && die "Issue title is required.\nUsage: plum create issue [OPTIONS] \"Title\""
+  [[ "$create_mr_flag" == true && "$create_branch_flag" == false ]] \
+    && die "-mr requires -b (a branch must be created before opening a PR)"
+
+  local title="$1"
+
+  init
+
+  local issue_number
+  issue_number=$(create_issue "$title")
+
+  if [[ "$create_branch_flag" == true ]]; then
+    local branch_name
+    branch_name=$(create_branch "$issue_number" "$title" "$target_branch")
+
+    if [[ "$create_mr_flag" == true ]]; then
+      create_pr "$branch_name" "$title" "$target_branch" "$issue_number"
+    fi
+  fi
+
+  echo ""
+  bold "Done."
+}
+
+cmd_create_branch() {
+  local base_branch="main"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -t)        [[ $# -lt 2 ]] && die "-t requires a branch name"; base_branch="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      -*)        die "Unknown option: $1" ;;
+      *)         break ;;
+    esac
+  done
+
+  [[ $# -eq 0 ]] && die "Issue number is required.\nUsage: plum create branch [OPTIONS] <issue-number>"
+  [[ ! "$1" =~ ^[0-9]+$ ]] && die "Issue number must be a positive integer, got: '$1'"
+
+  local issue_number="$1"
+
+  init
+
+  blue "Fetching issue #${issue_number}..."
+  local title
+  title=$(fetch_issue_title "$issue_number")
+  green "Found: \"${title}\""
+
+  create_branch "$issue_number" "$title" "$base_branch"
+
+  echo ""
+  bold "Done."
+}
+
+cmd_create_mr() {
+  local target_branch="main"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -t)        [[ $# -lt 2 ]] && die "-t requires a branch name"; target_branch="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      -*)        die "Unknown option: $1" ;;
+      *)         break ;;
+    esac
+  done
+
+  [[ $# -eq 0 ]] && die "PR title is required.\nUsage: plum create mr [OPTIONS] \"Title\""
+
+  local title="$1"
+
+  init
+
+  local current_branch
+  current_branch=$(git branch --show-current 2>/dev/null) \
+    || die "Could not determine current branch"
+  [[ -z "$current_branch" ]] && die "Not on a branch (detached HEAD state)"
+
+  create_pr "$current_branch" "$title" "$target_branch"
+
+  echo ""
+  bold "Done."
+}
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+[[ $# -eq 0 ]] && { usage; exit 0; }
+
+case "$1" in
+  create)
+    shift
+    case "${1:-}" in
+      issue)  shift; cmd_create_issue "$@" ;;
+      branch) shift; cmd_create_branch "$@" ;;
+      mr)     shift; cmd_create_mr "$@" ;;
+      *)      die "Unknown create subcommand: '${1:-}'. Available: issue, branch, mr" ;;
+    esac
+    ;;
+  -h|--help) usage; exit 0 ;;
+  *) die "Unknown command: '$1'. Try: plum create issue|branch|mr" ;;
+esac
