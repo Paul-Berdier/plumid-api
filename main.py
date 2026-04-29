@@ -31,19 +31,18 @@ log = logging.getLogger("uvicorn")
 # ---------------------------------------------------------------------------
 # Application
 # ---------------------------------------------------------------------------
-# Initialisation de la base de données (création des tables manquantes).
-#
-# En production (Railway), le schéma est construit par le conteneur PostgreSQL
-# via /docker-entrypoint-initdb.d/ (cf. SQL_migration_DB.sql). L'utilisateur
-# applicatif `plumid_app` n'a pas les droits CREATE sur le schéma public,
-# donc on tolère silencieusement les erreurs ici. En dev local (SQLite ou
-# superuser Postgres), cet appel crée bien les tables manquantes.
+# Schema management is handled by Alembic at container startup (see
+# scripts/run_migrations.py invoked by entrypoint.sh). The create_all
+# call below is kept as a defence-in-depth no-op for environments where
+# the entrypoint isn't used (e.g. running the app directly during dev).
+# It fails silently when the application role lacks CREATE on `public`,
+# which is the expected, healthy state in production.
 try:
     Base.metadata.create_all(bind=engine)
 except Exception as exc:  # noqa: BLE001
     log.warning(
         "Skipping Base.metadata.create_all (probable insufficient privileges, "
-        "expected when DB schema is managed externally): %s",
+        "expected when DB schema is managed by Alembic): %s",
         exc,
     )
 

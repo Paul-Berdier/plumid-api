@@ -165,19 +165,26 @@ where the SQL bootstrap is not used.
 
 ### Migrations
 
-In normal operation the DB container builds the schema on first boot,
-and `Base.metadata.create_all` is called once at API startup as a
-safety net. The application role `plumid_app` does **not** have the
-`CREATE` privilege on `public`, so that call fails silently (and is
-logged at WARNING level) — which is the expected, healthy state.
+Schema and seed data are managed by **Alembic**, run automatically at
+container startup via `entrypoint.sh` → `scripts/run_migrations.py`.
 
-For environments where you prefer Alembic to drive the schema:
+The runner is idempotent and handles three cases without manual
+intervention:
 
-```bash
-docker compose exec api alembic upgrade head      # apply baseline
-docker compose exec api alembic stamp head        # mark current DB as up-to-date
-docker compose exec api alembic revision --autogenerate -m "..."   # new revision
-```
+* Fresh database → applies the full chain (baseline + every revision).
+* Pre-existing database without `alembic_version` (e.g. tables created
+  by a manual SQL bootstrap) → stamps the baseline as already applied,
+  then runs only the newer revisions.
+* Already at head → no-op.
+
+To make this work on Railway's native Postgres plugin, set the
+`MIGRATIONS_DATABASE_URL` variable on the API service to the superuser
+DSN (the application role `plumid_app` cannot create the
+`alembic_version` table). The application's runtime `DATABASE_URL` can
+remain the restricted `plumid_app` account.
+
+See [`docs/migrations.md`](docs/migrations.md) for the complete guide
+(toggles, adding revisions, troubleshooting).
 
 ---
 

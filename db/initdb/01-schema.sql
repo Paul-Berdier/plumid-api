@@ -152,6 +152,20 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 -- script can safely be re-run.
 -- =========================
 
+-- Reserved id=0 row used by the model service when it cannot identify
+-- the bird (Non_plumes class). Inserted explicitly so its id is fixed.
+INSERT INTO species (
+    idspecies, sex, region, environment, information,
+    species_name, species_url_picture
+)
+VALUES (
+    0, NULL, NULL, NULL,
+    'Espèce non identifiée par le modèle.',
+    'Non identifié',
+    NULL
+)
+ON CONFLICT (idspecies) DO NOTHING;
+
 INSERT INTO species (region, environment, information, species_name, species_url_picture) VALUES
 ('Europe', 'Forêts, zones urbaines', 'La Pie bavarde (Pica pica) est une espèce de passereaux de la famille des Corvidae, et l''une des espèces de corvidés parmi les plus répandues en Europe et dans une grande partie de l''Asie. Les pies peuvent aisément être identifiées grâce à leur morphologie et à leur plumage noir et blanc caractéristique. Il existe 13 sous-espèces de pie bavarde.', 'Pie bavarde (Pica pica)', NULL),
 
@@ -165,3 +179,11 @@ INSERT INTO species (region, environment, information, species_name, species_url
 
 ('Europe, Asie, Amérique du Nord', 'Zones humides, étangs, rivières', 'Le Canard colvert, col-vert (Anas platyrhynchos), ou Canard malard au Canada, est une espèce d''oiseaux de l''ordre des Ansériformes, de la famille des Anatidae et de la sous-famille des Anatinae. C''est certainement le plus connu et reconnaissable de tous les canards, du fait de l''existence de races de canards domestiques issues de cette espèce.', 'Canard colvert (Anas platyrhynchos)', NULL)
 ON CONFLICT (species_name) DO NOTHING;
+
+-- Re-align the SERIAL sequence so subsequent INSERTs don't collide with
+-- the explicitly-set id=0 row above.
+SELECT setval(
+    pg_get_serial_sequence('species', 'idspecies'),
+    GREATEST((SELECT MAX(idspecies) FROM species), 1),
+    true
+);
