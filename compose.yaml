@@ -10,8 +10,8 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-plumid_password}
     volumes:
       - db_data:/var/lib/mysql
-    ports:
-      - "3306:3306"
+    networks:
+      - internal
     healthcheck:
       test: ["CMD", "mysqladmin", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}", "ping", "-h", "localhost"]
       interval: 10s
@@ -31,10 +31,23 @@ services:
       - .env
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-plumid}:${MYSQL_PASSWORD:-plumid_password}@db:3306/${MYSQL_DATABASE:-plumid}?charset=utf8mb4
-    ports:
-      - "8000:8000"
     volumes:
       - .:/app
+    networks:
+      - proxy
+      - internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.plumid-api.rule=Host(`plumid.atlaswk.ovh`)"
+      - "traefik.http.routers.plumid-api.entrypoints=websecure"
+      - "traefik.http.routers.plumid-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.plumid-api.loadbalancer.server.port=8000"
 
 volumes:
   db_data:
+
+networks:
+  proxy:
+    external: true
+  internal:
+    internal: true
