@@ -40,11 +40,16 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # Copy application source.
 COPY . /app
 
+# Make sure the entrypoint is executable (in case the file was uploaded
+# without the executable bit on Windows / certain CI systems).
+RUN chmod +x /app/entrypoint.sh
+
 # Drop privileges.
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 8000
 
-# Honour Railway's $PORT if provided, otherwise default to 8000.
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Use a shell-script entrypoint so $PORT is always expanded correctly,
+# even when Railway / fly.io / etc. override the start command.
+ENTRYPOINT ["/app/entrypoint.sh"]
