@@ -9,7 +9,7 @@ def test_create_species(client: TestClient):
             "species_name": "TestBird",
             "region": "TestingRegion",
             "environment": "Forest",
-            "sex": "Male",
+            "sex": "M",
             "information": "A test bird"
         }
     )

@@ -1,53 +1,81 @@
+# =====================================================================
+# PlumID — Local 3-container stack
+# ---------------------------------------------------------------------
+# Mirrors the Railway target architecture:
+#   - postgres   : custom Postgres image bootstrapped from db/initdb/
+#   - api        : FastAPI service (this repository)
+#   - model      : Pipeline-as-a-service (sibling repo plumid-model)
+#
+# Usage:
+#   docker compose up -d --build
+#
+# The `model` service expects the plumid-model directory to live next
+# to plumid-api on disk. If that's not the case, point the build context
+# explicitly with MODEL_BUILD_CONTEXT (default ../plumid-model).
+# =====================================================================
+
 services:
-  db:
-    image: mysql:8.0
+  postgres:
+    build:
+      context: ./db
+      dockerfile: Dockerfile
+    image: plumid-db:latest
     container_name: plumid-db
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-plumid}
-      MYSQL_USER: ${MYSQL_USER:-plumid}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-plumid_password}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rootpassword}
+      POSTGRES_DB: ${POSTGRES_DB:-plumid}
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
-      - db_data:/var/lib/mysql
+      - plumid_pgdata:/var/lib/postgresql/data
     networks:
-      - internal
+      - plumid_internal
     healthcheck:
-      test: ["CMD", "mysqladmin", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}", "ping", "-h", "localhost"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-plumid}"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   api:
     build:
       context: .
       dockerfile: Dockerfile
+    image: plumid-api:latest
     container_name: plumid-api
     restart: unless-stopped
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
     env_file:
       - .env
     environment:
-      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-plumid}:${MYSQL_PASSWORD:-plumid_password}@db:3306/${MYSQL_DATABASE:-plumid}?charset=utf8mb4
-    volumes:
-      - .:/app
+      # The API logs in as the application role created by the init script.
+      DATABASE_URL: postgresql+psycopg2://plumid_app:AppUser123!@postgres:5432/${POSTGRES_DB:-plumid}
+      MODEL_SERVICE_URL: http://model:8001
+    ports:
+      - "${API_HOST_PORT:-8000}:8000"
     networks:
-      - proxy
-      - internal
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.plumid-api.rule=Host(`plumid.atlaswk.ovh`)"
-      - "traefik.http.routers.plumid-api.entrypoints=websecure"
-      - "traefik.http.routers.plumid-api.tls.certresolver=letsencrypt"
-      - "traefik.http.services.plumid-api.loadbalancer.server.port=8000"
+      - plumid_internal
+
+  model:
+    build:
+      context: ${MODEL_BUILD_CONTEXT:-../plumid-model}
+      dockerfile: Dockerfile
+    image: plumid-model:latest
+    container_name: plumid-model
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: ${MODEL_LOG_LEVEL:-INFO}
+    ports:
+      - "${MODEL_HOST_PORT:-8001}:8001"
+    networks:
+      - plumid_internal
 
 volumes:
-  db_data:
+  plumid_pgdata:
 
 networks:
-  proxy:
-    external: true
-  internal:
-    internal: true
+  plumid_internal:
+    driver: bridge

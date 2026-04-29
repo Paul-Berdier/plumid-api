@@ -1,15 +1,12 @@
 # api/db.py
 from __future__ import annotations
 
-from contextlib import contextmanager
 from typing import Iterator, Optional, Dict, Any
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 
 from settings import settings
-
-from models.base import Base
 
 DB_URL: str = settings.db_url
 
@@ -22,12 +19,7 @@ POOL_KW: Dict[str, Any] = {
 
 CONNECT_ARGS: Dict[str, Any] = {}
 
-# SSL optionnel (si cert fourni)
-ssl_ca = settings.mysql_ssl_ca
-if ssl_ca and DB_URL.startswith("mysql"):
-    CONNECT_ARGS["ssl"] = {"ca": ssl_ca}
-
-# SQLite: connect_args spécifiques + pas de pool sizing
+# SQLite (utilisé uniquement pour les tests) : connect_args spécifiques + pas de pool sizing
 if DB_URL.startswith("sqlite"):
     CONNECT_ARGS.setdefault("check_same_thread", False)
     POOL_KW.pop("pool_size", None)
@@ -41,7 +33,8 @@ engine = create_engine(
 )
 
 SessionLocal = sessionmaker(
-    bind=engine, autocommit=False, autoflush=False, expire_on_commit=False)
+    bind=engine, autocommit=False, autoflush=False, expire_on_commit=False
+)
 
 
 def get_db() -> Iterator[Session]:

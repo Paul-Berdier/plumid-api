@@ -52,8 +52,9 @@ class Settings(BaseSettings):
     )
 
     # ---------------------------
-    # DB (MySQL) — 2 modes :
-    # 1) DATABASE_URL (recommandé, ex: mysql+pymysql://user:pass@host:3306/db?charset=utf8mb4)
+    # DB (PostgreSQL) — 2 modes :
+    # 1) DATABASE_URL (recommandé, fourni automatiquement par Railway PostgreSQL)
+    #    ex: postgresql+psycopg2://user:pass@host:5432/db
     # 2) Construction à partir des champs ci-dessous si DATABASE_URL vide
     # ---------------------------
     database_url: str = Field(
@@ -63,27 +64,23 @@ class Settings(BaseSettings):
 
     ip_db: str = Field(
         default="localhost",
-        validation_alias=AliasChoices("IP_DB", "DB_HOST"),
+        validation_alias=AliasChoices("IP_DB", "DB_HOST", "PGHOST"),
     )
     port_db: str = Field(
-        default="3306",
-        validation_alias=AliasChoices("PORT_DB", "DB_PORT"),
+        default="5432",
+        validation_alias=AliasChoices("PORT_DB", "DB_PORT", "PGPORT"),
     )
     user_db: str = Field(
-        default="user",
-        validation_alias=AliasChoices("USER_DB", "DB_USER"),
+        default="plumid_app",
+        validation_alias=AliasChoices("USER_DB", "DB_USER", "PGUSER"),
     )
     password_db: str = Field(
-        default="user",
-        validation_alias=AliasChoices("MDP_DB", "DB_PASSWORD"),
+        default="AppUser123!",
+        validation_alias=AliasChoices("MDP_DB", "DB_PASSWORD", "PGPASSWORD"),
     )
     name_db: str = Field(
         default="plumid",
-        validation_alias=AliasChoices("NAME_DB", "DB_NAME"),
-    )
-    db_charset: str = Field(
-        default="utf8mb4",
-        validation_alias=AliasChoices("DB_CHARSET"),
+        validation_alias=AliasChoices("NAME_DB", "DB_NAME", "PGDATABASE"),
     )
 
     # Pool & SSL (optionnels)
@@ -95,9 +92,24 @@ class Settings(BaseSettings):
         default=10,
         validation_alias=AliasChoices("DB_MAX_OVERFLOW"),
     )
-    mysql_ssl_ca: str = Field(
+    db_sslmode: str = Field(
         default="",
-        validation_alias=AliasChoices("MYSQL_SSL_CA"),
+        validation_alias=AliasChoices("DB_SSLMODE", "PGSSLMODE"),
+        description="PostgreSQL sslmode (ex: 'require', 'disable', 'verify-full')",
+    )
+
+    # ---------------------------
+    # Model service (microservice de prétraitement / inférence)
+    # ---------------------------
+    model_service_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("MODEL_SERVICE_URL"),
+        description="URL du service modèle (ex: http://plumid-model:8001)",
+    )
+    model_service_timeout: float = Field(
+        default=30.0,
+        validation_alias=AliasChoices("MODEL_SERVICE_TIMEOUT"),
+        description="Timeout (secondes) pour les appels au service modèle",
     )
 
     # ---------------------------
@@ -159,13 +171,16 @@ class Settings(BaseSettings):
     app_hmac_secret: str = Field(
         default="CHANGE_ME_SUPER_SECRET",
         validation_alias=AliasChoices("APP_HMAC_SECRET"),
-        description="Clé HMAC partagée avec l’app mobile"
+        description="Clé HMAC partagée avec l'app mobile",
     )
     max_clock_skew_sec: int = Field(300, validation_alias=AliasChoices("MAX_CLOCK_SKEW_SEC"))
     anti_replay_ttl_sec: int = Field(600, validation_alias=AliasChoices("ANTI_REPLAY_TTL_SEC"))
 
     # --- Body cap ---
-    max_request_body_bytes: int = Field(5_000_000, validation_alias=AliasChoices("MAX_REQUEST_BODY_BYTES"))  # 5MB
+    max_request_body_bytes: int = Field(
+        5_000_000,
+        validation_alias=AliasChoices("MAX_REQUEST_BODY_BYTES"),
+    )  # 5MB
 
     # ---------------------------
     # Helpers
@@ -179,20 +194,37 @@ class Settings(BaseSettings):
         return [s.strip() for s in raw.split(",") if s.strip()]
 
     @property
-    def mysql_dsn(self) -> str:
-        # DSN sans driver -> on uniformise avec PyMySQL
-        return (
-            f"mysql+pymysql://{self.user_db}:{self.password_db}"
-            f"@{self.ip_db}:{self.port_db}/{self.name_db}?charset={self.db_charset}"
+    def postgres_dsn(self) -> str:
+        """
+        Construit un DSN PostgreSQL avec psycopg2 à partir des champs unitaires.
+        """
+        base = (
+            f"postgresql+psycopg2://{self.user_db}:{self.password_db}"
+            f"@{self.ip_db}:{self.port_db}/{self.name_db}"
         )
+        if self.db_sslmode:
+            base += f"?sslmode={self.db_sslmode}"
+        return base
 
     @property
     def db_url(self) -> str:
         """
-        Privilégie DATABASE_URL si fourni, sinon construit un DSN MySQL complet.
-        Pour utiliser SQLite en dev, il suffit de mettre DATABASE_URL=sqlite:///./app.db
+        Privilégie DATABASE_URL si fourni (Railway le fait automatiquement),
+        sinon construit un DSN PostgreSQL complet.
+
+        Note : Railway / Heroku donnent souvent une URL de la forme
+        `postgres://...`. SQLAlchemy 2.x exige `postgresql+psycopg2://...`.
+        On normalise le préfixe ici.
         """
-        return self.database_url.strip() or self.mysql_dsn
+        url = self.database_url.strip()
+        if not url:
+            return self.postgres_dsn
+        # Normalisation Railway / Heroku
+        if url.startswith("postgres://"):
+            url = "postgresql+psycopg2://" + url[len("postgres://"):]
+        elif url.startswith("postgresql://") and "+psycopg2" not in url and "+psycopg" not in url:
+            url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+        return url
 
 
 settings = Settings()

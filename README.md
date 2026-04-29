@@ -1,475 +1,277 @@
-# Plum’ID — API
+# Plum'ID — API
 
-API REST pour Plum’ID (reconnaissance d’images de plumes).  
-Stack : **FastAPI**, **SQLAlchemy**, **MySQL** (ou SQLite en dev), **JWT** (comptes utilisateurs), **API Key** (service-to-service), **SMTP** (vérification d’email).
+REST API for **Plum'ID** (bird-feather identification).
+Stack: **FastAPI**, **SQLAlchemy 2**, **PostgreSQL** (SQLite for tests),
+**JWT** (user accounts), **API Key** (service-to-service),
+**HMAC + anti-replay** (mobile app uploads), **SMTP** (email verification).
 
-* **Docs interactives** : `http://localhost:8000/docs` (Swagger)
-* **Schéma OpenAPI** : `http://localhost:8000/openapi.json`
-
----
-
-## Sommaire
-
-1. [Prérequis](#prérequis)  
-2. [Configuration (.env)](#configuration-env)  
-3. [Lancement avec Docker Compose](#lancement-avec-docker-compose)  
-4. [Authentification](#authentification)  
-   * [API Key](#1-api-key-service-to-service)  
-   * [JWT + Vérification d'email](#2-jwt-comptes-utilisateurs--vérification-demail)  
-5. [Endpoints](#endpoints)  
-   * [Health](#health)  
-   * [Species](#species)  
-   * [Feathers](#feathers)  
-   * [Pictures](#pictures)  
-   * [Auth Utilisateurs](#auth-utilisateurs)  
-6. [Modèles de données](#modèles-de-données)  
-7. [Conventions & Erreurs](#conventions--erreurs)  
-8. [Exemples `curl`](#exemples-curl)
+* **Interactive docs**: `http://localhost:8000/docs` (Swagger)
+* **OpenAPI schema**: `http://localhost:8000/openapi.json`
 
 ---
 
-## Prérequis
+## Architecture
 
-* **Docker** et **Docker Compose** (v2+)
-* Un fichier `.env` correctement rempli (voir section suivante)
+The deployment target is **Railway with three services** (the same shape
+also runs locally via `docker compose`):
 
-> Aucune installation locale de Python, MySQL ou uvicorn n'est nécessaire.
+```
+┌─────────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│  plumid-db          │     │  plumid-api      │     │  plumid-model    │
+│  postgres:16        │◄────┤  FastAPI / Py3.11│────▶│  FastAPI worker  │
+│  init: 01-schema.sql│     │  /auth /species  │     │  /predict /preprocess
+│  (custom image)     │     │  /feathers …     │     │  (sibling repo)  │
+└─────────────────────┘     └──────────────────┘     └──────────────────┘
+```
+
+* **plumid-db** — built from `db/Dockerfile`, bootstraps the schema and
+  seed data from `db/initdb/01-schema.sql` on first boot.
+* **plumid-api** — this repository.
+* **plumid-model** — sibling repository ([`../plumid-model`](../plumid-model)),
+  exposes preprocessing + prediction over HTTP.
 
 ---
 
-## Configuration (.env)
-
-Créer un fichier `.env` à la racine du projet.
-
-### Logs & API
-
-```env
-# --- LOGGING
-LOG_LEVEL=INFO          # DEBUG / INFO / WARNING / ERROR
-LOG_SENSITIVE=0         # 1 pour loguer plus de détails (à éviter en prod)
-````
-
-### API Key (service-to-service)
-
-```env
-# --- API KEY (service-to-service)
-# Utilisée par le middleware d’auth interne (Bearer <token>)
-PLUMID_API_KEY=change_me_for_internal_calls
-```
-
-### Auth JWT (comptes utilisateurs)
-
-```env
-# --- AUTH JWT (comptes utilisateurs)
-AUTH_SECRET=change_this_to_a_long_random_secret
-ACCESS_TOKEN_EXPIRE_MINUTES=60
-```
-
-### CORS
-
-```env
-# --- CORS (CSV d'origines autorisées)
-# Exemple pour front en localhost
-CORS_ALLOW_ORIGINS=http://localhost:5173,http://localhost:3000
-```
-
-### Base de données
-
-Deux modes sont possibles :
-
-#### 1) URL complète (recommandé)
-
-```env
-DATABASE_URL=mysql+pymysql://plumid:password@localhost:3306/bird_db?charset=utf8mb4
-```
-
-#### 2) Champs unitaires (si `DATABASE_URL` est vide)
-
-```env
-# Hôte & port
-IP_DB=localhost          # alias supportés : DB_HOST
-PORT_DB=3306             # alias supportés : DB_PORT
-
-# Credentials
-USER_DB=plumid           # alias : DB_USER
-MDP_DB=password          # alias : DB_PASSWORD
-NAME_DB=bird_db          # alias : DB_NAME
-DB_CHARSET=utf8mb4
-
-# Pool & SSL (optionnels)
-DB_POOL_SIZE=5
-DB_MAX_OVERFLOW=10
-#MYSQL_SSL_CA=/etc/ssl/certs/rds-combined-ca-bundle.pem
-```
-
-Le code reconstruit un DSN MySQL si `DATABASE_URL` est vide.
-
-### SMTP (envoi d’email de vérification)
-
-```env
-# --- SMTP (vérification d'email)
-SMTP_HOST=localhost
-SMTP_PORT=1025
-SMTP_USER=
-SMTP_PASSWORD=
-SMTP_FROM=no-reply@plumid.local
-```
-
-En dev, tu peux utiliser un serveur type Mailpit/MailHog (`localhost:1025`), en prod un vrai provider.
-
-### Frontend (lien de vérification)
-
-```env
-# --- FRONTEND
-FRONTEND_BASE_URL=http://localhost:5173
-```
-
-Le lien de vérification envoyé par email sera de la forme :
-`<FRONTEND_BASE_URL>/verify-email?token=<JWT>`
-
----
-
-## Lancement avec Docker Compose
-
-Le `docker-compose.yaml` démarre deux services :
-
-| Service | Image / Build | Port exposé |
-| ------- | -------------- | ----------- |
-| `db` | `mysql:8.0` | `3306` |
-| `api` | `Dockerfile` local | `8000` |
-
-La base de données est alimentée par les variables d'environnement du `.env` et un volume nommé `db_data` assure la persistance des données.
-
-### Démarrage
+## Local development — 3-container stack
 
 ```bash
-# Construire et démarrer tous les services en arrière-plan
+# 1. Copy the env template and review the values
+cp .env.example .env
+
+# 2. Build & start all three services
 docker compose up -d --build
-```
 
-L'API écoute alors sur `http://localhost:8000`.  
-L'API attend que MySQL soit prêt (healthcheck) avant de démarrer.
-
-### Commandes utiles
-
-```bash
-# Voir les logs en temps réel
-docker compose logs -f
-
-# Logs d'un seul service
+# 3. Tail the logs
 docker compose logs -f api
-
-# Arrêter les services
-docker compose down
-
-# Arrêter ET supprimer les volumes (reset BDD)
-docker compose down -v
 ```
 
-### Variables Docker Compose
+The API listens on <http://localhost:8000>. PostgreSQL is exposed on
+`localhost:5432`. The model service answers on `http://localhost:8001`.
 
-Le `docker-compose.yaml` lit ton `.env` et surcharge automatiquement `DATABASE_URL` pour pointer vers le service `db` interne :
+> The `model` service expects the `plumid-model` repository to live next
+> to `plumid-api` on disk (i.e. `../plumid-model`). Override the path
+> with `MODEL_BUILD_CONTEXT` if it lives elsewhere.
 
-```env
-DATABASE_URL=mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db:3306/${MYSQL_DATABASE}?charset=utf8mb4
-```
-
-Tu peux personnaliser le compte MySQL via ces variables dans ton `.env` :
-
-```env
-MYSQL_ROOT_PASSWORD=rootpassword
-MYSQL_DATABASE=plumid
-MYSQL_USER=plumid
-MYSQL_PASSWORD=plumid_password
-```
-
----
-
-## Authentification
-
-L’API supporte **deux mécanismes distincts** :
-
-1. **API Key** (service-to-service)
-2. **JWT** (comptes utilisateurs, avec vérification d’email)
-
-Les routes métiers (`/species`, `/feathers`, `/pictures`) peuvent être protégées soit par l’API Key, soit par `get_current_user` (JWT) selon la config choisie dans le code.
-
----
-
-### 1) API Key (service-to-service)
-
-Pour les appels internes (jobs, micro-services, etc.) :
-
-```http
-Authorization: Bearer <PLUMID_API_KEY>
-```
-
-Exemple `curl` :
+### Tear down
 
 ```bash
-curl -H "Authorization: Bearer $PLUMID_API_KEY" http://localhost:8000/health
+docker compose down          # stop services
+docker compose down -v       # also wipe the Postgres volume (full reset)
 ```
 
 ---
 
-### 2) JWT (comptes utilisateurs + vérification d’email)
+## Railway deployment
 
-Les comptes utilisateurs sont stockés dans la table `users`.
-À l’inscription :
+Each of the three components becomes its own Railway **service**:
 
-* un utilisateur est créé avec `is_verified = false`,
-* un email de vérification est envoyé avec un lien contenant un **token** JWT (`scope = "email_verify"`),
-* tant que l’email n’est pas vérifié, le **login renvoie 403**.
+| Service        | Source                       | Runtime |
+| -------------- | ---------------------------- | ------- |
+| `plumid-db`    | this repo, root `db/`        | Postgres image baked from `db/Dockerfile` |
+| `plumid-api`   | this repo, root              | Python (Dockerfile auto-detected) |
+| `plumid-model` | `plumid-model` repo, root    | Python (Dockerfile auto-detected) |
 
-Endpoints :
+### 1. Create the database service
 
-* `POST /auth/register` — créer un compte et envoyer un email de vérification
-* `GET  /auth/verify-email` — valider l’adresse email à partir du token
-* `POST /auth/login` — obtenir un `access_token` JWT (si compte vérifié)
-* `GET  /auth/me` — récupérer le profil courant (JWT valide requis)
+* New service → **Deploy from GitHub repo** → pick the `plumid-api` repo
+  → set the **root directory** to `db/`.
+* Add a persistent volume mounted at `/var/lib/postgresql/data`
+  (Railway → Service → *Volumes*).
+* Set service variables:
+  * `POSTGRES_USER=postgres`
+  * `POSTGRES_PASSWORD=<strong-password>`
+  * `POSTGRES_DB=plumid`
+* On the first boot, the init script creates the schema, the
+  application roles (`plumid_app`, `plumid_editor`, …), and seeds the
+  `species` table.
 
-#### `POST /auth/register`
+> **Alternative**: use Railway's managed PostgreSQL plugin instead of
+> the custom container. In that case skip the `db/` service and apply
+> `db/initdb/01-schema.sql` once via `psql $DATABASE_URL -f …`. The
+> downside is that managed Postgres restricts `CREATE ROLE` — you may
+> need to drop the role-creation block from the SQL and connect the API
+> as the master user.
 
-Crée un nouvel utilisateur non vérifié et envoie un email de vérification.
+### 2. Create the API service
 
-**Body JSON :**
+* New service → **Deploy from GitHub repo** → pick `plumid-api`.
+* Service variables (minimum):
+  * `DATABASE_URL` — point to the Postgres service. With the custom DB
+    container above, use the application role:
+    `postgresql+psycopg2://plumid_app:AppUser123!@${{plumid-db.RAILWAY_PRIVATE_DOMAIN}}:5432/plumid`
+    (Railway exposes the private DNS as a template variable).
+  * `MODEL_SERVICE_URL` — `http://${{plumid-model.RAILWAY_PRIVATE_DOMAIN}}:8001`
+  * `AUTH_SECRET`, `APP_HMAC_SECRET`, `PLUMID_API_KEY` — strong random secrets.
+  * `CORS_ALLOW_ORIGINS` — comma-separated list of front-end domains.
+  * SMTP settings if email verification is enabled.
+* Railway injects `$PORT`; the container's CMD honours it.
 
-```json
-{
-  "mail": "user@example.com",
-  "username": "birdlover",
-  "password": "StrongPassw0rd!"
-}
+### 3. Create the model service
+
+Follow the deployment instructions in `../plumid-model/README.md`.
+
+### Networking
+
+Railway's private networking lets services reach each other on
+`*.railway.internal`. The API talks to Postgres and to the model
+service over that internal DNS — no public exposure required for those
+two. Only the API needs a public domain.
+
+---
+
+## Configuration reference
+
+All runtime config goes through environment variables. See
+[`.env.example`](.env.example) for the full list. Highlights:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | *(empty)* | Full Postgres DSN; takes priority over the discrete fields. Both `postgres://…` and `postgresql://…` are accepted (auto-rewritten to use psycopg2). |
+| `IP_DB` / `PORT_DB` / `USER_DB` / `MDP_DB` / `NAME_DB` | `postgres` / `5432` / `plumid_app` / `AppUser123!` / `plumid` | Used to build the DSN if `DATABASE_URL` is empty. Aliases: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`. |
+| `DB_SSLMODE` | *(empty)* | Set to `require` / `verify-full` for managed Postgres providers. |
+| `MODEL_SERVICE_URL` | *(empty)* | URL of the model microservice. If empty, `/upload/feather` returns a stub instead of forwarding. |
+| `AUTH_SECRET` | `PLEASE_CHANGE_ME` | HS256 secret for JWT signing. **Replace in production.** |
+| `APP_HMAC_SECRET` | `CHANGE_ME_SUPER_SECRET` | Shared with the mobile app for the `/upload/feather` HMAC signature. |
+| `PLUMID_API_KEY` | `MON_SUPER_TOKEN` | Bearer token for service-to-service calls. |
+| `CORS_ALLOW_ORIGINS` | `*` | CSV of allowed origins. |
+
+---
+
+## Database schema
+
+The schema is defined once, in `db/initdb/01-schema.sql`, and faithfully
+mirrored by the SQLAlchemy models under `models/`. A matching Alembic
+baseline lives at `alembic/versions/0001_baseline_pg.py` for environments
+where the SQL bootstrap is not used.
+
+### Tables
+
+* **species** — reference data (one row per bird species).
+  `idspecies`, `sex CHAR(1)`, `region`, `environment`, `information TEXT`,
+  `species_name UNIQUE`, `species_url_picture TEXT`.
+* **feathers** — feather records linked to a species.
+  `idfeathers`, `side`, `type`, `body_zone`, `species_id → species`.
+* **pictures** — image metadata linked to a feather.
+  `idpictures`, `url TEXT`, `longitude NUMERIC(9,6)`, `latitude NUMERIC(9,6)`,
+  `date_collected DATE`, `feathers_id → feathers`.
+* **users** — accounts.
+  `idusers`, `password_hash`, `role`, `mail UNIQUE`, `created_at`,
+  `username`, `is_active`, `email_verified_at`, `is_verified`,
+  `pictures_id → pictures` *(profile picture)*.
+
+> **Note**: pictures do **not** carry a foreign key back to the user.
+> Instead, users hold an optional `pictures_id` that references a
+> profile/avatar picture. This matches `SQL_migration_DB.sql`.
+
+### Migrations
+
+In normal operation the DB container builds the schema on first boot,
+and `Base.metadata.create_all` is called once at API startup as a
+safety net. The application role `plumid_app` does **not** have the
+`CREATE` privilege on `public`, so that call fails silently (and is
+logged at WARNING level) — which is the expected, healthy state.
+
+For environments where you prefer Alembic to drive the schema:
+
+```bash
+docker compose exec api alembic upgrade head      # apply baseline
+docker compose exec api alembic stamp head        # mark current DB as up-to-date
+docker compose exec api alembic revision --autogenerate -m "..."   # new revision
 ```
 
-**Réponse 201 :**
+---
 
-```json
-{
-  "idusers": 1,
-  "mail": "user@example.com",
-  "username": "birdlover",
-  "role": "user",
-  "is_verified": false,
-  "email_verified_at": null
-}
+## Authentication
+
+Two mechanisms coexist:
+
+1. **API Key** — for service-to-service calls (mobile backend, model
+   service, etc.). Header: `Authorization: Bearer <PLUMID_API_KEY>`.
+2. **JWT (HS256)** — for user accounts. Issued by `POST /auth/login`,
+   consumed by `Authorization: Bearer <jwt>`.
+
+The mobile-app upload endpoint (`POST /upload/feather`) requires an
+HMAC signature on top of the body, with anti-replay nonces:
+
+```
+X-Timestamp: <unix-seconds>
+X-Nonce: <random-string>
+X-Signature: base64(HMAC-SHA256(APP_HMAC_SECRET,
+                                "{METHOD}|{PATH}|{TS}|{NONCE}|{SHA256(BODY)}"))
 ```
 
-**Erreurs possibles :**
-
-* `400` — email déjà utilisé :
-
-  ```json
-  {
-    "error": {
-      "code": "HTTP_400",
-      "message": "Un utilisateur avec cet email existe déjà.",
-      "trace_id": "..."
-    }
-  }
-  ```
-
-* `422` — format d’email invalide (Pydantic, `EmailStr`).
-
-#### `GET /auth/verify-email?token=<JWT>`
-
-Valide l’adresse email à partir du token reçu par email.
-
-**Succès (200) :**
-
-```json
-{
-  "message": "Adresse email vérifiée avec succès."
-}
-```
-
-**Déjà vérifié (200) :**
-
-```json
-{
-  "message": "Adresse email déjà vérifiée."
-}
-```
-
-**Erreurs :**
-
-* `400` — token invalide ou expiré :
-
-  ```json
-  {
-    "error": {
-      "code": "HTTP_400",
-      "message": "Token de vérification invalide ou expiré.",
-      "trace_id": "..."
-    }
-  }
-  ```
-
-* `404` — utilisateur introuvable :
-
-  ```json
-  {
-    "error": {
-      "code": "HTTP_404",
-      "message": "Utilisateur introuvable.",
-      "trace_id": "..."
-    }
-  }
-  ```
-
-#### `POST /auth/login`
-
-**Body JSON :**
-
-```json
-{
-  "mail": "user@example.com",
-  "password": "StrongPassw0rd!"
-}
-```
-
-**Réponse 200 :**
-
-```json
-{
-  "access_token": "<jwt>",
-  "token_type": "bearer"
-}
-```
-
-**Erreurs :**
-
-* `401` — mail ou mot de passe incorrect :
-
-  ```json
-  {
-    "error": {
-      "code": "HTTP_401",
-      "message": "Email ou mot de passe invalide.",
-      "trace_id": "..."
-    }
-  }
-  ```
-
-* `403` — email non vérifié :
-
-  ```json
-  {
-    "error": {
-      "code": "HTTP_403",
-      "message": "Adresse email non vérifiée. Merci de vérifier ton email.",
-      "trace_id": "..."
-    }
-  }
-  ```
-
-#### `GET /auth/me`
-
-**Headers :**
-
-```http
-Authorization: Bearer <jwt>
-```
-
-**Réponse 200 :**
-
-```json
-{
-  "idusers": 1,
-  "mail": "user@example.com",
-  "username": "birdlover",
-  "role": "user",
-  "is_verified": true,
-  "email_verified_at": "2025-10-29T09:42:15.123456+00:00"
-}
-```
-
-Le token est signé en **HS256** avec `AUTH_SECRET`.
-La durée de vie est définie par `ACCESS_TOKEN_EXPIRE_MINUTES`.
+When `MODEL_SERVICE_URL` is set, the endpoint forwards the image to the
+model service and returns its prediction. Otherwise it acknowledges the
+upload and returns `prediction=null` (graceful degradation).
 
 ---
 
 ## Endpoints
 
-> **Résumé des routes principales :**
->
-> * `GET    /health`
-> * `POST   /species`
-> * `GET    /species/{idspecies}`
-> * `DELETE /species/{idspecies}`
-> * `POST   /feathers`
-> * `GET    /feathers/{idfeathers}`
-> * `DELETE /feathers/{idfeathers}`
-> * `POST   /pictures`
-> * `GET    /pictures/{idpictures}`
-> * `DELETE /pictures/{idpictures}`
-> * `POST   /auth/register`
-> * `GET    /auth/verify-email`
-> * `POST   /auth/login`
-> * `GET    /auth/me`
+```
+GET    /health
+POST   /auth/register
+POST   /auth/login
+GET    /auth/me
+POST   /auth/request-password-reset
+POST   /auth/reset-password
+POST   /species
+GET    /species/{idspecies}
+DELETE /species/{idspecies}
+POST   /feathers
+GET    /feathers/{idfeathers}
+DELETE /feathers/{idfeathers}
+POST   /pictures
+GET    /pictures/{idpictures}
+DELETE /pictures/{idpictures}
+POST   /upload/feather       (HMAC-signed, forwarded to model service)
+```
 
-### Health
-
-[...]
-
-*(les sections Species / Feathers / Pictures sont inchangées par rapport à ta version, tu peux les garder telles quelles, elles restent valides.)*
+See `/docs` for the full interactive contract.
 
 ---
 
-## Modèles de données
-
-### Table `users`
-
-* `idusers` (PK, int, auto)
-* `mail` (unique, varchar 255)
-* `username` (varchar 100)
-* `password_hash` (varchar 255, hashé via bcrypt)
-* `role` (varchar 45, ex. `"user"`, `"admin"`)
-* `created_at` (datetime, default `CURRENT_TIMESTAMP`)
-* `pictures_idpictures` (FK → `pictures.idpictures`, `ON DELETE SET NULL`)
-* `is_verified` (bool, défaut `false`)
-* `email_verified_at` (datetime, nullable) — horodatage de la vérification
-
-*(Les autres tables `species`, `feathers`, `pictures` restent comme tu les avais, tu peux garder les définitions actuelles.)*
-
----
-
-## Conventions & Erreurs
-
-*(Identique à ta version, avec le même format d’erreur et les codes HTTP)*
-
----
-
-## Exemples `curl`
-
-Ajout d’un exemple pour la vérification d’email :
+## Tests
 
 ```bash
-# Inscription utilisateur
-curl -X POST http://localhost:8000/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{
-        "mail": "user@example.com",
-        "username": "birdlover",
-        "password": "StrongPassw0rd!"
-      }'
+# Inside the api container
+docker compose exec api pytest -q
 
-# (L'utilisateur reçoit un mail avec un lien du type :
-#   http://localhost:5173/verify-email?token=<JWT>
-# Le front peut ensuite appeler directement l’API si besoin.)
+# Or locally with a venv
+pip install -r requirements.txt
+pytest -q
+```
 
-# Vérification d’email côté backend (test manuel par exemple)
-curl "http://localhost:8000/auth/verify-email?token=<JWT>"
+Tests use an in-memory SQLite database (see `tests/conftest.py`), so
+they don't need PostgreSQL or any of the other services.
 
-# Login utilisateur (après vérification d’email)
-curl -X POST http://localhost:8000/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{
-        "mail": "user@example.com",
-        "password": "StrongPassw0rd!"
-      }'
+---
 
-# Profil utilisateur courant (remplace <jwt> par le token reçu)
-curl http://localhost:8000/auth/me \
-  -H "Authorization: Bearer <jwt>"
+## Repository layout
+
+```
+plumid-api/
+├── alembic/                # Alembic config + single PG baseline
+├── core/                   # security primitives (bcrypt, JWT)
+├── crud/                   # data-access helpers
+├── db/                     # ── plumid-db service ──────────────
+│   ├── Dockerfile          # custom postgres:16 image
+│   ├── initdb/
+│   │   └── 01-schema.sql   # auto-run on first DB boot
+│   └── railway.json
+├── dependencies/           # FastAPI deps (auth, …)
+├── docs/                   # internal docs (alembic guide, …)
+├── middlewares/            # tracing, body-cap, rate limiter
+├── models/                 # SQLAlchemy models (mirror of the SQL schema)
+├── routes/                 # FastAPI routers
+├── schemas/                # Pydantic schemas
+├── security/               # HMAC + anti-replay
+├── services/               # outbound integrations (SMTP, …)
+├── tests/                  # pytest suite (SQLite-backed)
+├── compose.yaml            # 3-container local stack
+├── Dockerfile              # API image
+├── railway.json            # API service config
+├── requirements.txt
+├── settings.py             # pydantic-settings
+└── README.md
 ```

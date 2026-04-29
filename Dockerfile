@@ -1,42 +1,50 @@
-# Use official lightweight Python 3.11 runtime as a parent image
+# =====================================================================
+# PlumID — API container (FastAPI + SQLAlchemy + PostgreSQL)
+# ---------------------------------------------------------------------
+# Build:
+#   docker build -t plumid-api:latest .
+#
+# Run (locally):
+#   docker run --rm -p 8000:8000 \
+#     -e DATABASE_URL=postgresql+psycopg2://plumid_app:AppUser123!@host.docker.internal:5432/plumid \
+#     plumid-api:latest
+#
+# Railway: detects the Dockerfile automatically. Set DATABASE_URL,
+# MODEL_SERVICE_URL, AUTH_SECRET, and friends in the service variables.
+# Railway also injects $PORT — the entrypoint honours it.
+# =====================================================================
+
 FROM python:3.11-slim
 
-# Set strict environment variables for Python runtime behavior:
-# PYTHONDONTWRITEBYTECODE: Prevents Python from writing .pyc files to disk
-# PYTHONUNBUFFERED: Prevents Python from buffering stdout/stderr, ensuring logs are flushed immediately
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PORT=8000
 
-# Set the working directory mapping
 WORKDIR /app
 
-# Install system dependencies required for C-extensions and building Python packages (e.g., cryptography, passlib)
-# Cleans up apt cache afterwards to minimize the final image layer size
+# System deps:
+#   - build-essential, libssl-dev, libffi-dev → cryptography / passlib
+#   - libpq-dev → psycopg2 (PostgreSQL client lib)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libssl-dev \
-    libffi-dev \
+        build-essential \
+        libssl-dev \
+        libffi-dev \
+        libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Leverage Docker layer caching by copying requirements.txt independently
-# This prevents rebuilding the dependency layer if only the application code changes
+# Install Python deps first for better layer caching.
 COPY requirements.txt ./requirements.txt
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Upgrade pip and install Python dependencies without caching wheel files to optimize image size
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Copy the application source code into the corresponding package directory
-# Placed in /app/api to resolve the application's absolute imports (e.g., `from api.models.base import Base`)
+# Copy application source.
 COPY . /app
 
-# Enforce least privilege security best practices
-# Create a non-privileged system user and assign ownership of the working directory
+# Drop privileges.
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Expose the designated port for the ASGI server
 EXPOSE 8000
 
-# Define the container's entrypoint instruction running the Uvicorn ASGI server
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Honour Railway's $PORT if provided, otherwise default to 8000.
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

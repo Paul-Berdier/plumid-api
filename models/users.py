@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     func,
     Boolean,
+    ForeignKey,
     UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
@@ -17,39 +18,55 @@ from models.base import Base
 
 class Users(Base):
     """
-    User model representing the 'users' table in the database.
-    Stores authentication details and user profile information.
+    Users model representing the 'users' table.
+    Matches the schema defined in SQL_migration_DB.sql.
+
+    SQL definition:
+        idusers           SERIAL PRIMARY KEY
+        password_hash     VARCHAR(255) NOT NULL
+        role              VARCHAR(50)
+        mail              VARCHAR(100) UNIQUE
+        created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        username          VARCHAR(100)
+        is_active         BOOLEAN DEFAULT TRUE
+        email_verified_at TIMESTAMP
+        is_verified       BOOLEAN DEFAULT FALSE
+        pictures_id       INT REFERENCES pictures(idpictures) ON DELETE SET NULL
     """
     __tablename__ = "users"
 
     idusers = Column(Integer, primary_key=True, index=True, autoincrement=True)
     password_hash = Column(String(255), nullable=False)
-    role = Column(String(45))
-    mail = Column(String(255), nullable=False)
+    role = Column(String(50), nullable=True)
+    mail = Column(String(100), nullable=True)
     created_at = Column(
         DateTime,
         server_default=func.current_timestamp(),
         nullable=False,
     )
-    username = Column(String(100))
+    username = Column(String(100), nullable=True)
 
     is_active = Column(
         Boolean,
         nullable=False,
-        server_default="1",
+        server_default="true",
+        default=True,
     )
     is_verified = Column(
         Boolean,
         nullable=False,
-        server_default="0",
+        server_default="false",
+        default=False,
     )
-    email_verified_at = Column(
-        DateTime,
+    email_verified_at = Column(DateTime, nullable=True)
+
+    # Avatar/profile picture (optional FK toward pictures)
+    pictures_id = Column(
+        Integer,
+        ForeignKey("pictures.idpictures", ondelete="SET NULL"),
         nullable=True,
     )
-
-    # Relations
-    pictures = relationship("Pictures", back_populates="user", lazy="select")
+    avatar = relationship("Pictures", lazy="joined", foreign_keys=[pictures_id])
 
     __table_args__ = (
         UniqueConstraint("mail", name="uniq_users_mail"),

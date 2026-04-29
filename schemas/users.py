@@ -14,6 +14,7 @@ class UserBase(BaseModel):
     is_active: Optional[bool] = None
     is_verified: Optional[bool] = None
     email_verified_at: Optional[datetime] = None
+    pictures_id: Optional[int] = None
 
 
 class UserCreate(BaseModel):
@@ -54,19 +55,13 @@ class TokenPayload(BaseModel):
 
 
 class PasswordResetRequest(BaseModel):
-    """
-    Payload pour demander une réinitialisation de mot de passe.
-    """
-    mail: EmailStr = Field(...,
-                           description="Adresse email du compte à réinitialiser")
+    """Payload pour demander une réinitialisation de mot de passe."""
+    mail: EmailStr = Field(..., description="Adresse email du compte à réinitialiser")
 
 
 class PasswordResetConfirm(BaseModel):
-    """
-    Payload pour appliquer une réinitialisation de mot de passe.
-    """
-    token: str = Field(...,
-                       description="Token de réinitialisation reçu par email")
+    """Payload pour appliquer une réinitialisation de mot de passe."""
+    token: str = Field(..., description="Token de réinitialisation reçu par email")
     new_password: str = Field(
         ...,
         min_length=8,
@@ -76,10 +71,5 @@ class PasswordResetConfirm(BaseModel):
 
 
 class ResendVerificationRequest(BaseModel):
-    """
-    Payload pour redemander un email de vérification.
-    """
-    mail: EmailStr = Field(
-        ...,
-        description="Adresse email du compte à vérifier",
-    )
+    """Payload pour redemander un email de vérification."""
+    mail: EmailStr = Field(..., description="Adresse email du compte à vérifier")

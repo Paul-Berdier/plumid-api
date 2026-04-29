@@ -31,8 +31,21 @@ log = logging.getLogger("uvicorn")
 # ---------------------------------------------------------------------------
 # Application
 # ---------------------------------------------------------------------------
-# Initialisation de la base de données (création des tables manquantes)
-Base.metadata.create_all(bind=engine)
+# Initialisation de la base de données (création des tables manquantes).
+#
+# En production (Railway), le schéma est construit par le conteneur PostgreSQL
+# via /docker-entrypoint-initdb.d/ (cf. SQL_migration_DB.sql). L'utilisateur
+# applicatif `plumid_app` n'a pas les droits CREATE sur le schéma public,
+# donc on tolère silencieusement les erreurs ici. En dev local (SQLite ou
+# superuser Postgres), cet appel crée bien les tables manquantes.
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as exc:  # noqa: BLE001
+    log.warning(
+        "Skipping Base.metadata.create_all (probable insufficient privileges, "
+        "expected when DB schema is managed externally): %s",
+        exc,
+    )
 
 app = FastAPI(title="Plum'ID - API", version=settings.api_version)
 
@@ -130,7 +143,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 # ---------------------------------------------------------------------------
-# Exemple d’endpoint sensible signé (HMAC + anti-replay)
+# Exemple d'endpoint sensible signé (HMAC + anti-replay)
 # ---------------------------------------------------------------------------
 require_sig = require_signed_request(settings, _redis)
 
@@ -138,12 +151,57 @@ require_sig = require_signed_request(settings, _redis)
 @app.post("/upload/feather", dependencies=[Depends(require_sig)])
 async def upload_feather(file: UploadFile = File(...)):
     """
-    Endpoint d’upload protégé par signature HMAC + nonce anti-replay.
+    Endpoint d'upload protégé par signature HMAC + nonce anti-replay.
+
     - En-têtes requis côté client : X-Timestamp, X-Nonce, X-Signature
-    - Voir clients/python/plumid_sign.py pour générer la signature.
+    - Si MODEL_SERVICE_URL est défini, l'image est transmise au service modèle
+      (microservice de prétraitement / inférence) et la prédiction est renvoyée.
+    - Sinon, on renvoie simplement un accusé de réception (mode dégradé).
     """
-    # TODO: intégrer ton pipeline (enregistrement, queue, inference, etc.)
-    return {"ok": True, "filename": file.filename}
+    import httpx  # import local pour ne pas alourdir le démarrage
+
+    content = await file.read()
+
+    if not settings.model_service_url:
+        log.warning(
+            "MODEL_SERVICE_URL non configuré, upload_feather renvoie un stub."
+        )
+        return {
+            "ok": True,
+            "filename": file.filename,
+            "bytes": len(content),
+            "prediction": None,
+            "detail": "MODEL_SERVICE_URL not configured",
+        }
+
+    model_url = settings.model_service_url.rstrip("/") + "/predict"
+    try:
+        async with httpx.AsyncClient(timeout=settings.model_service_timeout) as cli:
+            resp = await cli.post(
+                model_url,
+                files={
+                    "file": (
+                        file.filename or "feather.png",
+                        content,
+                        file.content_type or "application/octet-stream",
+                    )
+                },
+            )
+            resp.raise_for_status()
+            prediction: Dict[str, Any] = resp.json()
+    except httpx.HTTPError as exc:
+        log.exception("Appel au service modèle KO: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Model service unreachable: {exc!s}",
+        ) from exc
+
+    return {
+        "ok": True,
+        "filename": file.filename,
+        "bytes": len(content),
+        "prediction": prediction,
+    }
 
 # ---------------------------------------------------------------------------
 # Mount routers
